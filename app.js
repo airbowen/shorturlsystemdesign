@@ -7,14 +7,20 @@ const crypto = require('crypto');
 const app = express();
 
 // Configure AWS
-AWS.config.update({ region: 'us-east-1' });
+AWS.config.update({ 
+  region: process.env.AWS_REGION || 'us-east-1',
+  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
+});
+
 const dynamodb = new AWS.DynamoDB.DocumentClient();
-const TABLE_NAME = 'URLMapping';
+const TABLE_NAME = process.env.DYNAMODB_TABLE || 'URLMapping';
 
 // Setup Redis client
 const redis = new Redis({
   host: process.env.REDIS_HOST || 'localhost',
-  port: process.env.REDIS_PORT || 6379
+  port: process.env.REDIS_PORT || 6379,
+  password: process.env.REDIS_PASSWORD
 });
 
 // Middleware
@@ -48,8 +54,10 @@ app.post('/newurl', async (req, res) => {
     // Generate a unique short code
     let shortCode;
     let isUnique = false;
+    let retries = 0;
+    const MAX_RETRIES = 5;
     
-    while (!isUnique) {
+    while (!isUnique && retries < MAX_RETRIES) {
       shortCode = generateShortCode();
       
       // Check if code already exists
@@ -60,7 +68,13 @@ app.post('/newurl', async (req, res) => {
       
       if (!existingItem.Item) {
         isUnique = true;
+      } else {
+        retries++;
       }
+    }
+    
+    if (!isUnique) {
+      return res.status(500).json({ error: 'Could not generate unique code, please try again' });
     }
     
     // Store in DynamoDB
@@ -141,7 +155,19 @@ app.get('/:shortCode([a-zA-Z0-9]{9})', async (req, res) => {
 
 // Health check endpoint for load balancer
 app.get('/health', (req, res) => {
-  res.status(200).send('OK');
+  // Check Redis connection
+  const redisStatus = redis.status === 'ready' ? 'OK' : 'ERROR';
+  
+  // Basic health check - can be enhanced to check DynamoDB too
+  const status = {
+    service: 'URL Shortener',
+    redis: redisStatus,
+    timestamp: new Date().toISOString()
+  };
+  
+  const isHealthy = redisStatus === 'OK';
+  
+  res.status(isHealthy ? 200 : 500).json(status);
 });
 
 // Function to update hit count
